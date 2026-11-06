@@ -1,0 +1,52 @@
+name: Historical Scrape (2072-01-01 to 2083-07-19)
+
+on:
+  workflow_dispatch:      # just press "Run workflow" - no options to choose
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrape-historical
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install nepali-datetime beautifulsoup4 lxml
+      - id: m
+        run: echo "matrix=$(python -m scraper.run plan --start 2072-01-01 --end 2083-07-19)" >> $GITHUB_OUTPUT
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    name: scrape ${{ matrix.year }}
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-1.48.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Git identity
+        run: |
+          git config user.name  "cause-list-bot"
+          git config user.email "cause-list-bot@users.noreply.github.com"
+      - name: Scrape year ${{ matrix.year }} (${{ matrix.start }} to ${{ matrix.end }})
+        run: python -m scraper.run range --start "${{ matrix.start }}" --end "${{ matrix.end }}" --git-push
