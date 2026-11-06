@@ -1,0 +1,106 @@
+name: Scrape KDC Daily Cause List
+
+on:
+  schedule:
+    # Nepal time = UTC + 5:45.  First run 8:00 PM NPT, then retries through the night until ~6:00 AM NPT.
+    # Runs that find nothing new finish in about a minute.
+    - cron: "15 14 * * *"   # 20:00 NPT
+    - cron: "15 16 * * *"   # 22:00 NPT
+    - cron: "15 18 * * *"   # 00:00 NPT
+    - cron: "15 20 * * *"   # 02:00 NPT
+    - cron: "15 22 * * *"   # 04:00 NPT
+    - cron: "15 0 * * *"    # 06:00 NPT
+  workflow_dispatch:        # the manual "Run workflow" button
+    inputs:
+      mode:
+        description: "daily = today/tomorrow + catch-up | historical = 2072-01-01..2083-07-19 | range = custom dates | probe = debug one date"
+        type: choice
+        default: daily
+        options: [daily, historical, range, probe]
+      start_date:
+        description: "range/probe: BS start date YYYY-MM-DD (probe uses this date)"
+        required: false
+      end_date:
+        description: "range: BS end date YYYY-MM-DD"
+        required: false
+      force:
+        description: "Re-download dates that already exist"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scrape-${{ github.event.inputs.mode || 'daily' }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install nepali-datetime beautifulsoup4 lxml
+      - id: m
+        env:
+          MODE: ${{ github.event.inputs.mode || 'daily' }}
+          S: ${{ github.event.inputs.start_date }}
+          E: ${{ github.event.inputs.end_date }}
+        run: |
+          if [ "$MODE" = "historical" ]; then
+            echo "matrix=$(python -m scraper.run plan)" >> $GITHUB_OUTPUT
+          elif [ "$MODE" = "range" ]; then
+            echo "matrix=$(python -m scraper.run plan --start "$S" --end "$E")" >> $GITHUB_OUTPUT
+          else
+            echo 'matrix={"include":[{"start":"","end":"","year":0}]}' >> $GITHUB_OUTPUT
+          fi
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      max-parallel: 3          # be gentle with the court server
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Cache browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-1.48.0
+      - run: python -m playwright install --with-deps chromium
+      - name: Git identity
+        run: |
+          git config user.name  "cause-list-bot"
+          git config user.email "cause-list-bot@users.noreply.github.com"
+      - name: Run scraper
+        env:
+          MODE: ${{ github.event.inputs.mode || 'daily' }}
+          START: ${{ matrix.start }}
+          END: ${{ matrix.end }}
+          PROBE_DATE: ${{ github.event.inputs.start_date }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          case "$MODE" in
+            daily)      python -m scraper.run daily --git-push ;;
+            probe)      python -m scraper.run probe --date "$PROBE_DATE" ;;
+            *)          EXTRA=""; [ "$FORCE" = "true" ] && EXTRA="--force"
+                        python -m scraper.run range --start "$START" --end "$END" $EXTRA --git-push ;;
+          esac
+      - name: Upload probe files
+        if: ${{ github.event.inputs.mode == 'probe' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe
+          path: probe/
