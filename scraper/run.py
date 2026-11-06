@@ -50,7 +50,13 @@ def fetch_and_store(site, iso: str):
     html = site.search(iso)
     res = parse(html)
     if (res.causes or res.judges) and res.heading_date and res.heading_date != iso:
-        raise StaleResult(f"asked {iso} but page shows {res.heading_date}")
+        # The site falls back to another day's list when the requested date has none
+        # (tomorrow not yet published, holiday...). Confirm once with a fresh page load, then treat as "no list".
+        site.open()
+        res = parse(site.search(iso))
+        if (res.causes or res.judges) and res.heading_date and res.heading_date != iso:
+            print(f"[info] {iso}: site shows {res.heading_date} instead -> no list for this date", flush=True)
+            return "nodata", False
     changed = False
     if res.causes:
         changed |= writer.write_cause(iso, res.causes)
@@ -72,6 +78,7 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
         iso = bsdate.iso(d)
         y = iso[:4]
         nodata.setdefault(y, _load("no_data", y))
+        failed.setdefault(y, _load("failed", y))
         both = writer.cause_path(iso).exists() and writer.judges_path(iso).exists()
         if not force and iso not in refetch and (both or iso in nodata[y]):
             stats["skipped"] += 1
@@ -106,10 +113,11 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
                             print(f"[warn] restart failed: {e2}", flush=True)
             if outcome is None:
                 stats["failed"] += 1
-                failed.setdefault(y, set()).add(iso)
+                failed[y].add(iso)
                 print(f"[FAIL] {iso}", flush=True)
             else:
                 kind, changed = outcome
+                failed[y].discard(iso)
                 if kind == "data":
                     if changed:
                         stats["updated" if iso in refetch else "saved"] += 1
@@ -132,7 +140,7 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
         _flush_state(nodata, failed)
         if git_push:
             from .gitsync import commit_and_push
-            commit_and_push(f"Cause lists: run finished ({dt.datetime.utcnow():%Y-%m-%d %H:%M} UTC)")
+            commit_and_push(f"Cause lists: run finished ({dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M} UTC)")
     return stats
 
 
