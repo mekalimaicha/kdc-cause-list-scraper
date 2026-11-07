@@ -46,23 +46,19 @@ class StaleResult(Exception):
 
 
 def fetch_and_store(site, iso: str):
-    """Returns ('data'|'nodata', changed:bool)."""
-    html = site.search(iso)
-    res = parse(html)
+    """Returns ('data'|'nodata', changed:bool, note:str). search() always loads a fresh page."""
+    res = parse(site.search(iso))
+    note = (f"typed={getattr(site,'typed','?')} box_after={getattr(site,'after','?')} "
+            f"page_date={res.heading_date or '-'} cause_rows={len(res.causes)} judge_rows={len(res.judges)}")
     if (res.causes or res.judges) and res.heading_date and res.heading_date != iso:
-        # The site falls back to another day's list when the requested date has none
-        # (tomorrow not yet published, holiday...). Confirm once with a fresh page load, then treat as "no list".
-        site.open()
-        res = parse(site.search(iso))
-        if (res.causes or res.judges) and res.heading_date and res.heading_date != iso:
-            print(f"[info] {iso}: site shows {res.heading_date} instead -> no list for this date", flush=True)
-            return "nodata", False
+        # The site shows another day's list when the requested date has none.
+        return "nodata", False, note + " (site returned a different date)"
     changed = False
     if res.causes:
         changed |= writer.write_cause(iso, res.causes)
     if res.judges:
         changed |= writer.write_judges(iso, res.judges)
-    return ("data" if (res.causes or res.judges) else "nodata"), changed
+    return ("data" if (res.causes or res.judges) else "nodata"), changed, note
 
 
 def scrape_dates(dates, force=False, refetch=(), git_push=False):
@@ -77,7 +73,7 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
     for d in dates:
         iso = bsdate.iso(d)
         y = iso[:4]
-        nodata.setdefault(y, _load("no_data", y))
+        nodata.setdefault(y, _load("no_data_v2", y))
         failed.setdefault(y, _load("failed", y))
         both = writer.cause_path(iso).exists() and writer.judges_path(iso).exists()
         if not force and iso not in refetch and (both or iso in nodata[y]):
@@ -96,8 +92,8 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
             outcome = None
             for attempt in range(1, RETRIES + 1):
                 try:
-                    kind, changed = fetch_and_store(site, iso)
-                    outcome = (kind, changed)
+                    kind, changed, note = fetch_and_store(site, iso)
+                    outcome = (kind, changed, note)
                     break
                 except Exception as e:  # network error, stale page, layout problem...
                     print(f"[warn] {iso} attempt {attempt}/{RETRIES}: {e}", flush=True)
@@ -116,16 +112,16 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
                 failed[y].add(iso)
                 print(f"[FAIL] {iso}", flush=True)
             else:
-                kind, changed = outcome
+                kind, changed, note = outcome
                 failed[y].discard(iso)
                 if kind == "data":
                     if changed:
                         stats["updated" if iso in refetch else "saved"] += 1
-                    print(f"[{n}/{len(todo)}] {iso} data {'(written)' if changed else '(unchanged)'}", flush=True)
+                    print(f"[{n}/{len(todo)}] {iso} data {'(written)' if changed else '(unchanged)'} | {note}", flush=True)
                     nodata[y].discard(iso)
                 else:
                     stats["nodata"] += 1
-                    print(f"[{n}/{len(todo)}] {iso} no list (holiday / not published)", flush=True)
+                    print(f"[{n}/{len(todo)}] {iso} NO LIST | {note}", flush=True)
                     if bsdate.parse_bs(iso) < today:        # today / future may still be published later
                         nodata[y].add(iso)
                 since_commit += 1
@@ -146,7 +142,7 @@ def scrape_dates(dates, force=False, refetch=(), git_push=False):
 
 def _flush_state(nodata, failed):
     for y, s in nodata.items():
-        _save("no_data", y, s)
+        _save("no_data_v2", y, s)
     for y, s in failed.items():
         _save("failed", y, s)
 
@@ -199,6 +195,31 @@ def cmd_probe(a):
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
+def cmd_diagnose(a):
+    """Tests several dates (each on a fresh page) and prints what the site really returns."""
+    from .browser import Site
+    out = ROOT / "probe"
+    out.mkdir(exist_ok=True)
+    dates = a.dates.split(",")
+    lines = []
+    with Site() as site:
+        for iso in dates:
+            iso = iso.strip()
+            try:
+                html = site.search(iso)
+                res = parse(html)
+                (out / f"{iso}.html").write_text(html, encoding="utf-8")
+                site.screenshot(str(out / f"{iso}.png"))
+                line = (f"asked={iso} typed={site.typed} box_after={site.after} page_date={res.heading_date or '-'} "
+                        f"cause_rows={len(res.causes)} judge_rows={len(res.judges)}")
+            except Exception as e:
+                line = f"asked={iso} ERROR {e}"
+            print(line, flush=True)
+            lines.append(line)
+            time.sleep(1)
+    (out / "diagnose.txt").write_text("\n".join(lines), encoding="utf-8")
+
+
 def cmd_plan(a):
     """One matrix entry per BS year, so each year runs in its own 6-hour GitHub job."""
     start = bsdate.parse_bs(a.start or HISTORICAL_START)
@@ -214,7 +235,7 @@ def cmd_plan(a):
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("daily", cmd_daily), ("range", cmd_range), ("probe", cmd_probe), ("plan", cmd_plan)):
+    for name, fn in (("daily", cmd_daily), ("range", cmd_range), ("probe", cmd_probe), ("diagnose", cmd_diagnose), ("plan", cmd_plan)):
         sp = sub.add_parser(name)
         sp.set_defaults(fn=fn)
         if name in ("range", "plan"):
@@ -226,6 +247,8 @@ def main():
             sp.add_argument("--git-push", action="store_true")
         if name == "probe":
             sp.add_argument("--date", required=True)
+        if name == "diagnose":
+            sp.add_argument("--dates", required=True)
     a = p.parse_args()
     a.fn(a)
 
