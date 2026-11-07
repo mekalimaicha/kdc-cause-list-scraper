@@ -29,3 +29,20 @@ def test_range_skip_and_nodata(tmp_path, monkeypatch):
     assert not (tmp_path / "data/2083/2083-07-18_Daily_Cause_List_KDC.csv").exists()
     s2 = run.scrape_dates(dates)                     # second run: everything skipped
     assert s2["skipped"] == 2
+
+
+def test_fallback_to_other_date_is_nodata(tmp_path, monkeypatch):
+    for m in (writer, run, config):
+        monkeypatch.setattr(m, "DATA_DIR", tmp_path / "data", raising=False)
+    monkeypatch.setattr(run, "STATE_DIR", tmp_path / "state")
+
+    class Fallback(FakeSite):
+        def search(self, iso):
+            return T.build_html()          # always the 2083-07-19 list, whatever date is asked
+
+    monkeypatch.setattr(browser, "Site", Fallback)
+    monkeypatch.setattr(run, "DELAY_BETWEEN_DATES", 0)
+    d = bsdate.parse_bs("2083-07-21")
+    s = run.scrape_dates([d])
+    assert s["nodata"] == 1 and s["failed"] == 0
+    assert not list((tmp_path / "data").glob("**/*.csv"))
