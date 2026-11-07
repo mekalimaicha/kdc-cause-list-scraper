@@ -11,6 +11,7 @@ class FakeSite:
     def __enter__(self): return self
     def __exit__(self, *a): pass
     def open(self): pass
+    typed=after='x'
     def search(self, iso):
         return T.build_html() if iso == "2083-07-19" else "<html><body><form></form>no list</body></html>"
 
