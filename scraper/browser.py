@@ -58,20 +58,28 @@ class Site:
             inp.evaluate("""(el, v) => { el.value = v;
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true})); }""", value)
-        self.page.keyboard.press("Escape")      # closes any pop-up calendar
+        return inp
 
     # -- public ---------------------------------------------------------------------------
     def search(self, iso: str) -> str:
-        """Search one BS date (YYYY-MM-DD) and return the resulting page HTML."""
+        """Search one BS date (YYYY-MM-DD). Always starts from a freshly loaded page so no state
+        (date-picker memory, earlier results) can leak from the previous search."""
+        self.open()
         value = bsdate.to_dev(iso)             # the site shows Nepali digits in the box
-        self._set_date(value)
-        self._submit().click()
+        inp = self._set_date(value)
+        self.typed = inp.input_value().strip()
+        # JS click: works even if a pop-up calendar covers the button
+        self._submit().evaluate("el => el.click()")
         try:
             self.page.wait_for_load_state("load", timeout=NAV_TIMEOUT_MS)
             self.page.wait_for_load_state("networkidle", timeout=30000)
         except PWTimeout:
             pass
         time.sleep(0.5)
+        try:
+            self.after = self._date_input().input_value().strip()
+        except Exception:
+            self.after = ""
         return self.page.content()
 
     def screenshot(self, path: str):
