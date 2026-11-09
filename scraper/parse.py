@@ -89,6 +89,35 @@ _POSITIONAL = dict(sn=0, case=1, reg=2, subject=3, plaintiff=4, defendant=5, sec
                    priority=7, remarks=8, order=9)
 
 
+def _col_index_old(headers):
+    """Old layout (2072 .. 2078-09-30): क्र स | मुद्दा नं | दर्ता मिती | मुद्दा | पक्ष || विपक्ष | फाँटवाला | कैफियत"""
+    idx = {}
+    for i, h in enumerate(headers):
+        if "पक्ष" in h:
+            idx["parties"] = i
+        elif "मुद्दा न" in h:
+            idx["case"] = i
+        elif "दर्ता" in h:
+            idx["reg"] = i
+        elif "फाँट" in h or "फाट" in h:
+            idx["section"] = i
+        elif "कैफियत" in h:
+            idx["remarks"] = i
+        elif h.startswith("मुद्दा"):
+            idx["subject"] = i
+        elif "क्र" in h:
+            idx["sn"] = i
+    for k, v in dict(sn=0, case=1, reg=2, subject=3, parties=4, section=5, remarks=6).items():
+        idx.setdefault(k, v)
+    return idx
+
+
+def _split_parties(text: str):
+    """'वादी || प्रतिवादी' -> (वादी, प्रतिवादी)"""
+    parts = re.split(r"\s*\|\|\s*", clean(text), maxsplit=1)
+    return (parts[0], parts[1] if len(parts) > 1 else "") if parts else ("", "")
+
+
 def _split_case(text: str):
     t = clean(text)
     m = re.match(r"^(.*?)\s*(\([^()]*\))\s*$", t)
@@ -144,17 +173,42 @@ def parse(html: str) -> ParseResult:
         elif is_cause_table(tbl):
             court, judge = _court_and_judge(tbl)
             idx = None
+            old_layout = False
             for _, cells in _own_cells(tbl):
                 t = [_flat_cell(c) for c in cells]
                 if idx is None:
                     if any("मुद्दा न" in x for x in t):
-                        idx = _col_index(t)
-                        for k, v in _POSITIONAL.items():   # fill anything the header matching missed
-                            idx.setdefault(k, v)
+                        old_layout = any("पक्ष" in x for x in t)       # "पक्ष || विपक्ष" column => old layout
+                        if old_layout:
+                            idx = _col_index_old(t)
+                        else:
+                            idx = _col_index(t)
+                            for k, v in _POSITIONAL.items():           # fill anything the header matching missed
+                                idx.setdefault(k, v)
                     continue
-                if len(t) < 9 or not any(t):
+                if not any(t):
                     continue
                 g = lambda k: t[idx[k]] if idx[k] < len(t) else ""
+                if old_layout:
+                    if len(t) < 6:
+                        continue
+                    case, sig = _split_case(g("case"))
+                    reg = g("reg")
+                    if DATE_STYLE == "model":
+                        reg = bsdate.site_date_to_model(reg)
+                    plaintiff, defendant = _split_parties(g("parties"))
+                    remarks_raw = g("remarks")
+                    # In the old layout the कैफियत column holds the order text ("आदेश >> ...").
+                    # That text belongs in "आदेश फैसलाको किसिम"; anything else stays in कैफियत.
+                    if ">>" in remarks_raw:
+                        remarks, order = "", _order(remarks_raw)
+                    else:
+                        remarks, order = remarks_raw, ""
+                    res.causes.append([court, judge, g("sn"), case, sig, reg, g("subject"), plaintiff,
+                                       defendant, g("section"), "", remarks, order])
+                    continue
+                if len(t) < 9:
+                    continue
                 case, sig = _split_case(g("case"))
                 reg = g("reg")
                 if DATE_STYLE == "model":
